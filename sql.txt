@@ -1,0 +1,166 @@
+-- Creación de la base de datos
+CREATE DATABASE IF NOT EXISTS finanzas_personales;
+USE finanzas_personales;
+
+-- Tabla de usuarios
+CREATE TABLE usuarios (
+    id_usuario INT AUTO_INCREMENT PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL,
+    correo VARCHAR(100) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    fecha_registro DATETIME DEFAULT CURRENT_TIMESTAMP,
+    ultimo_acceso DATETIME NULL
+);
+
+-- Tabla de categorías
+CREATE TABLE categorias (
+    id_categoria INT AUTO_INCREMENT PRIMARY KEY,
+    id_usuario INT NOT NULL,
+    nombre VARCHAR(50) NOT NULL,
+    descripcion VARCHAR(255),
+    color VARCHAR(7) DEFAULT '#000000',
+    icono VARCHAR(50) DEFAULT 'apps-outline', -- Para almacenar el nombre del icono (Ionicons)
+    fecha_creacion DATETIME DEFAULT CURRENT_TIMESTAMP,
+    activo BOOLEAN DEFAULT TRUE,
+    FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario) ON DELETE CASCADE,
+    CONSTRAINT uc_categoria_usuario UNIQUE (id_usuario, nombre)
+);
+
+-- Tabla de transacciones (ingresos y egresos)
+CREATE TABLE transacciones (
+    id_transaccion INT AUTO_INCREMENT PRIMARY KEY,
+    id_usuario INT NOT NULL,
+    id_categoria INT NOT NULL,
+    titulo VARCHAR(100) NOT NULL,
+    monto DECIMAL(12, 2) NOT NULL,
+    tipo_transaccion ENUM('ingreso', 'egreso') NOT NULL,
+    fecha_transaccion DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    nota TEXT,
+    FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario) ON DELETE CASCADE,
+    FOREIGN KEY (id_categoria) REFERENCES categorias(id_categoria) ON DELETE RESTRICT
+);
+
+-- Vista para el cálculo de saldo disponible, ingresos y egresos totales
+CREATE VIEW resumen_financiero AS
+SELECT 
+    id_usuario,
+    SUM(CASE WHEN tipo_transaccion = 'ingreso' THEN monto ELSE 0 END) AS ingresos_totales,
+    SUM(CASE WHEN tipo_transaccion = 'egreso' THEN monto ELSE 0 END) AS egresos_totales,
+    SUM(CASE WHEN tipo_transaccion = 'ingreso' THEN monto ELSE -monto END) AS saldo_disponible
+FROM 
+    transacciones
+GROUP BY 
+    id_usuario;
+
+-- Vista para el análisis de promedios por periodo (mes)
+CREATE VIEW analisis_promedios AS
+SELECT 
+    t.id_usuario,
+    DATE_FORMAT(t.fecha_transaccion, '%Y-%m-01') AS periodo,
+    SUM(CASE WHEN t.tipo_transaccion = 'ingreso' THEN t.monto ELSE 0 END) AS ingresos_mes,
+    SUM(CASE WHEN t.tipo_transaccion = 'egreso' THEN t.monto ELSE 0 END) AS egresos_mes,
+    ROUND(
+      (SUM(CASE WHEN t.tipo_transaccion = 'ingreso' THEN t.monto ELSE 0 END) - 
+       SUM(CASE WHEN t.tipo_transaccion = 'egreso' THEN t.monto ELSE 0 END)) / 
+      SUM(CASE WHEN t.tipo_transaccion = 'ingreso' THEN t.monto ELSE 0 END) * 100, 
+    2) AS porcentaje_ahorro,
+    ROUND(
+      SUM(CASE WHEN t.tipo_transaccion = 'ingreso' THEN t.monto ELSE 0 END) / 
+      GREATEST(SUM(CASE WHEN t.tipo_transaccion = 'egreso' THEN t.monto ELSE 0 END), 1), 
+    2) AS relacion_ingreso_egreso
+FROM 
+    transacciones t
+GROUP BY 
+    t.id_usuario, periodo;
+
+-- Vista para el análisis de gastos por categoría
+CREATE VIEW analisis_categorias AS
+SELECT 
+    t.id_usuario,
+    c.id_categoria,
+    c.nombre AS nombre_categoria,
+    c.color,
+    c.icono,
+    t.tipo_transaccion,
+    SUM(t.monto) AS monto_total,
+    AVG(t.monto) AS promedio_monto,
+    COUNT(t.id_transaccion) AS numero_transacciones,
+    ROUND(
+      SUM(t.monto) / 
+      (SELECT SUM(monto) FROM transacciones 
+       WHERE id_usuario = t.id_usuario AND tipo_transaccion = t.tipo_transaccion) * 100, 
+    2) AS porcentaje
+FROM 
+    transacciones t
+JOIN 
+    categorias c ON t.id_categoria = c.id_categoria
+GROUP BY 
+    t.id_usuario, c.id_categoria, t.tipo_transaccion;
+
+-- Procedimiento almacenado para obtener el dashboard de un usuario
+DELIMITER //
+CREATE PROCEDURE obtener_dashboard(IN p_id_usuario INT)
+BEGIN
+    -- Resumen financiero general
+    SELECT 
+        ingresos_totales, 
+        egresos_totales, 
+        saldo_disponible
+    FROM 
+        resumen_financiero
+    WHERE 
+        id_usuario = p_id_usuario;
+    
+    -- Transacciones recientes (5 más recientes)
+    SELECT 
+        t.id_transaccion,
+        t.titulo,
+        t.monto,
+        t.tipo_transaccion,
+        t.fecha_transaccion,
+        c.nombre AS categoria,
+        c.color,
+        c.icono
+    FROM 
+        transacciones t
+    JOIN 
+        categorias c ON t.id_categoria = c.id_categoria
+    WHERE 
+        t.id_usuario = p_id_usuario
+    ORDER BY 
+        t.fecha_transaccion DESC
+    LIMIT 5;
+END //
+DELIMITER ;
+
+-- Índices para optimizar consultas
+CREATE INDEX idx_transacciones_usuario ON transacciones(id_usuario);
+CREATE INDEX idx_transacciones_categoria ON transacciones(id_categoria);
+CREATE INDEX idx_transacciones_fecha ON transacciones(fecha_transaccion);
+CREATE INDEX idx_categorias_usuario ON categorias(id_usuario);
+
+-- Inserción de datos iniciales (categorías predeterminadas para nuevos usuarios)
+DELIMITER //
+CREATE PROCEDURE crear_categorias_iniciales(IN p_id_usuario INT)
+BEGIN
+    INSERT INTO categorias (id_usuario, nombre, color, icono) VALUES
+    (p_id_usuario, 'Alimentación', '#FF6B6B', 'fast-food-outline'),
+    (p_id_usuario, 'Transporte', '#4ECDC4', 'car-outline'),
+    (p_id_usuario, 'Vivienda', '#118AB2', 'home-outline'),
+    (p_id_usuario, 'Entretenimiento', '#FFD166', 'film-outline'),
+    (p_id_usuario, 'Salud', '#4CAF50', 'medical-outline'),
+    (p_id_usuario, 'Trabajo', '#607D8B', 'briefcase-outline'),
+    (p_id_usuario, 'Servicios', '#118AB2', 'flash-outline'),
+    (p_id_usuario, 'Otros', '#073B4C', 'apps-outline');
+END //
+DELIMITER ;
+
+-- Trigger para crear categorías predeterminadas al registrar un nuevo usuario
+DELIMITER //
+CREATE TRIGGER after_user_insert
+AFTER INSERT ON usuarios
+FOR EACH ROW
+BEGIN
+    CALL crear_categorias_iniciales(NEW.id_usuario);
+END //
+DELIMITER ;
